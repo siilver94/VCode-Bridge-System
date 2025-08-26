@@ -19,8 +19,14 @@ from utils.loaders import (
     load_lookups,           # 7종 lookup dict
     lookup_options,         # lookup 테이블에서 part_type별 옵션 dict 추출
     load_crossmap,          # Cross_Map.csv → (ik2ok, ok2ik)
-    load_matched_full,      # matched_parts.csv (안전 로더)
+    load_matched_full,   
+    load_union_schema,
+    # matched_parts.csv (안전 로더)
 )
+
+ from notebooks.vcode_codec import (    # ★ 추가
+     encode_both, required_keys, extra_keys_from_other_side,
+     missing_required_keys, _slot_to_range,
 
 # ---------------------------------------------------------------------
 # 기본 페이지 설정 (wide + 제목/아이콘)
@@ -175,6 +181,13 @@ ik_pt = sel_pt if sel_pt.startswith("V") else (paired_pt or "")
 ok_pt = (paired_pt or "") if sel_pt.startswith("V") else sel_pt
 
 st.caption(f"선택된 Pair  |  IK: {ik_pt or '-'}  /  OK: {ok_pt or '-'}")
+
+# ★ union 스키마 로딩 & pair_id
+udf = load_union_schema()
+if ik_pt and ok_pt:
+    pair_id = f"{ik_pt}_{ok_pt}"
+else:
+    pair_id = None
 
 # ---------------------------------------------------------------------
 # 4) 입력 기준 선택 (한쪽만 입력, 다른쪽은 자동 조회)
