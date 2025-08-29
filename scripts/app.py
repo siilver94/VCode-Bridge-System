@@ -1,38 +1,40 @@
 #!/usr/bin/env python
 # coding: utf-8
 """
-V/KM-Code 통합 조회 Demo (최종 안정판)
+V/KM-Code 통합 조회 Demo (union_schema + vcode_codec 통합 확장판)
 - 카테고리 → 세부명칭(파트타입) 선택
-- 한쪽(IK/OK) 속성만 입력 → 스키마 순서대로 11자리 코드 조립(자리수 자동 0-패딩)
-- matched_parts.csv 로 상대 코드 조회(없으면 Cross_Map으로 part_type 페어 fallback)
+- 기준 측(IK/OK)을 고르면: 기준 필수 + 상대측 부족분만 입력 UI 자동 생성
+- 입력 한 번 → IK/OK 11자리 동시에 생성 (encode_both)
+- matched_parts.csv 있으면 결과 확인/보강
 - 좌/우(익산/옥천) 이미지 가로 출력
 """
 
 import re
 import streamlit as st
 
-# 프로젝트용 로더/헬퍼 (utils/loaders.py에 구현되어 있다고 가정)
+# 프로젝트용 로더/헬퍼
 from utils.loaders import (
     load_catalog,           # part_master.csv (+category)
     load_images,            # images/<part_type>*.{jpg,png}
-    load_code_schema,       # codeSchema_IK.csv / codeSchema_OK.csv
+    load_code_schema,       # codeSchema_IK.csv / codeSchema_OK.csv (참고: 일부 util에서만 사용)
     load_lookups,           # 7종 lookup dict
-    lookup_options,         # lookup 테이블에서 part_type별 옵션 dict 추출
+    lookup_options,         # lookup 테이블에서 part_type별 옵션 dict 추출 {code: label}
     load_crossmap,          # Cross_Map.csv → (ik2ok, ok2ik)
-    load_matched_full,   
-    load_union_schema,
-    # matched_parts.csv (안전 로더)
+    load_matched_full,      # matched_parts.csv (안전 로더)
+    load_union_schema,      # union_schema.csv 로더
 )
 
- from notebooks.vcode_codec import (    # ★ 추가
-     encode_both, required_keys, extra_keys_from_other_side,
-     missing_required_keys, _slot_to_range,
+# vcode_codec (11자리 조립/해석기)
+from notebooks.vcode_codec import (
+    encode_both, required_keys, extra_keys_from_other_side, missing_required_keys, _slot_to_range,
+    decode_attrs_from_code,
+)
 
 # ---------------------------------------------------------------------
 # 기본 페이지 설정 (wide + 제목/아이콘)
 # ---------------------------------------------------------------------
 st.set_page_config(page_title="V/KM-Code Viewer", page_icon="🔎", layout="wide")
-st.title("V‑CODE · KM‑CODE 통합 조회 (Demo)")
+st.title("V-CODE · KM-CODE 통합 조회 (Demo)")
 
 # ---------------------------------------------------------------------
 # 0) 공통 유틸
@@ -41,28 +43,19 @@ def _norm(s: str) -> str:
     """코드 비교용 정규화: 공백/하이픈 제거 + 대문자화"""
     return re.sub(r"[\s\-]+", "", str(s or "")).upper()
 
+# (참고 util) 스키마 기반 폭 산출/패딩 — 현재는 직접 사용하지 않지만 호환성 위해 보관
 def _attr_width_from_schema(site: str, part_type: str, attr_name: str):
-    """
-    스키마(codeSchema_{IK/OK}.csv)에서 해당 속성의 자리수 길이를 계산.
-    길이 = pos_to - pos_from + 1
-    """
     schema = load_code_schema(site.upper())
     r = schema[(schema.part_type == part_type) & (schema.attr_name == attr_name)]
     if r.empty:
         return None
     try:
-        pf = int(r.iloc[0]["pos_from"])
-        pt = int(r.iloc[0]["pos_to"])
+        pf = int(r.iloc[0]["pos_from"]); pt = int(r.iloc[0]["pos_to"])
         return max(1, pt - pf + 1)
     except Exception:
         return None
 
 def normalize_selected_by_schema(site: str, part_type: str, selected: dict) -> dict:
-    """
-    사용자가 입력/선택한 속성 dict({attr: value})를
-    스키마에 정의된 자리수 길이에 맞춰 '0'으로 왼쪽 패딩.
-    - 혼합문자(예: 'A1')도 문자열 기준으로 패딩 (스키마는 자릿수만 보장)
-    """
     if not selected:
         return {}
     out = {}
@@ -70,21 +63,15 @@ def normalize_selected_by_schema(site: str, part_type: str, selected: dict) -> d
         s = str(v).strip()
         width = _attr_width_from_schema(site, part_type, k)
         if width and s:
-            s = s.zfill(width)  # ← 핵심: 자리수 자동 0-패딩
+            s = s.zfill(width)
         out[k] = s
     return out
 
-def assemble_by_schema(site: str, part_type: str, selected: dict) -> str or None:
-    """
-    스키마 순서대로(현재 선택/입력된 키만) 세그먼트를 이어 붙여 11자리 코드 생성.
-    - selected는 normalize_selected_by_schema()를 거친 값 사용 권장(자리수 보장)
-    - 반환: 완성된 'part_type + 세그먼트' 또는 None
-    """
+def assemble_by_schema(site: str, part_type: str, selected: dict) -> str | None:
     schema = load_code_schema(site.upper())
     rules  = schema[schema.part_type == part_type]
     if rules.empty or not selected:
         return None
-
     segs = []
     for _, r in rules.iterrows():
         attr = (r.get("attr_name", "") or "").strip()
@@ -94,37 +81,75 @@ def assemble_by_schema(site: str, part_type: str, selected: dict) -> str or None
         if not val:
             continue
         segs.append(val)
-
     return f"{part_type}{''.join(segs)}" if segs else None
 
 # ---------------------------------------------------------------------
-# 1) 빠른 검색 상태 보관 (카테고리/파트타입 프리필)
+# 1) 상태: 카테고리/파트타입 프리필 + 11자리 프리필 attrs
 # ---------------------------------------------------------------------
 if "pref_cat" not in st.session_state:
     st.session_state.pref_cat = None
 if "pref_pt" not in st.session_state:
     st.session_state.pref_pt = None
+# ★ 변경: 11자리 해석으로 얻은 attrs 저장용
+if "prefill_attrs" not in st.session_state:
+    st.session_state.prefill_attrs = {}
+if "__basis_override" not in st.session_state:
+    st.session_state.__basis_override = None
 
 # 카탈로그 로드 (site/category/part_type/remark 등)
 df = load_catalog()
 
 # ---------------------------------------------------------------------
-# 2) 빠른 검색 (V*** 또는 ####/#####)
+# 2) 빠른 검색 (V*** / ####/##### / ★ 11자리)
 # ---------------------------------------------------------------------
 with st.expander("🔎 빠른 검색 (V*** 또는 KM 4~5자리)"):
-    q = st.text_input("품명코드(Part Type) 검색", placeholder="예: V111 또는 2655")
+    q = st.text_input("품명코드(Part Type) 검색", placeholder="예: V111 / 2655 / V111260408")
     if st.button("찾기", use_container_width=False):
         s = (q or "").strip().upper()
-        if re.fullmatch(r"V\d{3}", s) or re.fullmatch(r"\d{4,5}", s):
+
+        # (A) 11자리 완전코드 → 자동 프리필
+        if re.fullmatch(r"[A-Z0-9]{11}", s):
+            udf_local = load_union_schema()
+            side = "IK" if s.startswith("V") else "OK"
+            pair_id, attrs, pt = decode_attrs_from_code(udf_local, side, s)
+
+            # 카탈로그에서 part_type 찾아 화면 이동
+            hit = df[df.part_type.astype(str) == pt]
+            if hit.empty and side == "OK":
+                # OK 5자리 우선이라면 4자리 보정
+                hit = df[df.part_type.astype(str) == s[:4]]
+
+            if hit.empty:
+                st.warning("카탈로그에서 해당 part_type을 찾지 못했습니다.")
+            else:
+                st.session_state.pref_pt  = hit.iloc[0]["part_type"]
+                st.session_state.pref_cat = hit.iloc[0]["category"]
+
+            # ★ 변경: 프리필 값과 기준방향 세션 저장
+            st.session_state.prefill_attrs = {k: ("" if attrs.get(k) is None else str(attrs.get(k))) for k in attrs}
+            st.session_state.__basis_override = ("익산 코드 입력 → 옥천 자동 조회" if side=="IK"
+                                                 else "옥천 코드 입력 → 익산 자동 조회")
+
+            st.success(f"선택 이동: {pt} (코드 프리필 완료)")
+            try:
+                st.rerun()
+            except Exception:
+                st.experimental_rerun()
+
+        # (B) part_type만 검색 (V### 또는 ####/#####)
+        elif re.fullmatch(r"V\d{3}", s) or re.fullmatch(r"\d{4,5}", s):
             hit = df[df.part_type == s]
             if hit.empty:
                 st.warning("해당 Part Type이 part_master에 없습니다.")
             else:
                 st.session_state.pref_pt  = s
                 st.session_state.pref_cat = hit.iloc[0]["category"]
+                # ★ 변경: 프리필 초기화
+                st.session_state.prefill_attrs = {}
+                st.session_state.__basis_override = None
                 st.success(f"선택 이동: {s}")
         else:
-            st.error("형식이 올바르지 않습니다. V### 또는 ####/#####")
+            st.error("형식이 올바르지 않습니다. V### / #### / ##### / 또는 11자리 코드")
 
 # ---------------------------------------------------------------------
 # 3) 대분류 → 세부명칭 (IK 우선 / Cross_Map 라벨 표시)
@@ -143,10 +168,9 @@ is_iksan = df_sub["part_type"].astype(str).str.startswith("V", na=False)
 df_ik    = df_sub[is_iksan]
 df_show  = df_ik if not df_ik.empty else df_sub[~is_iksan]
 
-# Cross_Map을 라벨링에 활용 (V111 ↔ 2655 형태)
+# Cross_Map 라벨: "V111 ↔ 2655"
 ik2ok, ok2ik = load_crossmap()
-
-label_map = {}  # "라벨" → (sel_pt, paired_pt)
+label_map = {}
 for _, r in df_show.iterrows():
     pt = str(r.part_type)
     if pt.startswith("V"):
@@ -176,184 +200,221 @@ else:
 sel_label         = st.selectbox("세부명칭", labels, index=sel_idx)
 sel_pt, paired_pt = label_map[sel_label]
 
-# 좌/우 패널에 고정할 IK/OK part_type 확정
+# 좌/우 part_type 확정
 ik_pt = sel_pt if sel_pt.startswith("V") else (paired_pt or "")
 ok_pt = (paired_pt or "") if sel_pt.startswith("V") else sel_pt
-
 st.caption(f"선택된 Pair  |  IK: {ik_pt or '-'}  /  OK: {ok_pt or '-'}")
 
-# ★ union 스키마 로딩 & pair_id
+# union 스키마 + pair_id
 udf = load_union_schema()
-if ik_pt and ok_pt:
-    pair_id = f"{ik_pt}_{ok_pt}"
-else:
-    pair_id = None
+pair_id = f"{ik_pt}_{ok_pt}" if (ik_pt and ok_pt) else None
+
+if pair_id and udf[udf["pair_id"] == pair_id].empty:
+    st.warning(f"union_schema에 pair_id '{pair_id}' 행이 없습니다. (빌더 최신화 확인)")
 
 # ---------------------------------------------------------------------
-# 4) 입력 기준 선택 (한쪽만 입력, 다른쪽은 자동 조회)
+# 4) 입력 기준 선택
 # ---------------------------------------------------------------------
 basis = st.radio(
     "입력 기준을 선택하세요",
     ["익산 코드 입력 → 옥천 자동 조회", "옥천 코드 입력 → 익산 자동 조회"],
     horizontal=True,
 )
-basis_ik = basis.startswith("익산")  # True: IK가 입력측, False: OK가 입력측
+# ★ 변경: 11자리 프리필에서 기준 자동 전환
+if st.session_state.__basis_override in ["익산 코드 입력 → 옥천 자동 조회","옥천 코드 입력 → 익산 자동 조회"]:
+    basis = st.session_state.__basis_override
+
+basis_ik   = basis.startswith("익산")
+base_side  = "IK" if basis_ik else "OK"
+other_side = "OK" if basis_ik else "IK"
 
 # ---------------------------------------------------------------------
-# 5) 동적 속성 패널 렌더러
-# - 스키마 + 룩업 기반으로 해당 part_type의 속성 위젯을 자동 생성
+# 5) 속성 렌더러 (slot 순 정렬 + 프리필 주입)
 # ---------------------------------------------------------------------
-def render_attributes(site: str, part_type: str) -> dict:
-    """
-    반환: {attr_name: 선택/입력된 코드값(문자열)}
-    - 룩업 테이블이 있으면 selectbox(코드-라벨 포맷)
-    - 룩업이 없으면 자유 입력(text_input)
-    """
-    schema  = load_code_schema("IK" if site.upper() == "IK" else "OK")
-    lookups = load_lookups()
-    rules   = schema[schema.part_type == part_type]
+def _slot_range(slot: str):
+    try:
+        rng = _slot_to_range(slot)
+        if not rng:
+            return (999, 999)
+        return rng
+    except Exception:
+        return (999, 999)
 
-    if rules.empty:
-        st.info("이 품목에 대한 스키마가 없습니다.")
-        return {}
-
-    selected = {}
-    for _, r in rules.iterrows():
-        attr  = (r.get("attr_name", "") or "attr").strip()
-        table = (r.get("lookup_table", "") or "").strip()
-
-        # 룩업 기반 selectbox
-        if table and table in lookups:
-            opts = lookup_options(lookups, table, part_type)  # {code: label}
-            if not opts:
-                st.warning(f"{attr} : 옵션 없음")
-                continue
-
-            def _fmt(c):
-                return f"{c} - {opts.get(c, '')}" if opts.get(c) else c
-
-            sel = st.selectbox(attr, list(opts.keys()), format_func=_fmt,
-                               key=f"{site}:{part_type}:{attr}")
-            selected[attr] = sel
-
-        # 자유 입력
+def _order_keys_by_slot(udf, pair_id: str, side: str, keys: list[str]) -> list[str]:
+    col_slot = "ik_slot" if side.upper()=="IK" else "ok_slot"
+    S = udf[udf["pair_id"] == pair_id].set_index("key")
+    pairs = []
+    for k in keys:
+        if k in S.index:
+            a,b = _slot_range(str(S.loc[k][col_slot] or ""))
+            pairs.append((a, b, k))
         else:
-            sel = st.text_input(attr, key=f"{site}:{part_type}:{attr}")
-            selected[attr] = str(sel).strip()
+            pairs.append((999, 999, k))
+    pairs.sort()
+    return [k for _,__,k in pairs]
 
-    return selected
+# ★ 변경: 프리필을 실제 위젯 기본값으로 주입하는 헬퍼
+def _prime_default(widget_key: str, value: str):
+    """해당 위젯 key가 아직 세션에 없을 때만 초기값을 주입."""
+    if value is None:
+        return
+    if widget_key not in st.session_state:
+        st.session_state[widget_key] = str(value)
+
+def _render_inputs_for_side(
+    udf, pair_id: str, side: str, pt_for_lookup: str,
+    keys: list[str], tag_suffix: str=""
+) -> dict:
+    lookups = load_lookups()
+    S = udf[udf["pair_id"] == pair_id].copy().set_index("key")
+    keys_sorted = _order_keys_by_slot(udf, pair_id, side, keys)
+
+    # ★ 변경: 11자리에서 해석해 온 프리필 딕셔너리
+    prefill = st.session_state.get("prefill_attrs", {}) or {}
+
+    attrs = {}
+    cols = st.columns(2)
+    i = 0
+    for k in keys_sorted:
+        if k not in S.index:
+            st.warning(f"{k} : union_schema에 없음")
+            continue
+        r = S.loc[k]
+        dtype   = str(r.get("dtype","") or "").strip()
+        lookup  = str(r.get("lookup","") or "").strip()
+        ik_slot = str(r.get("ik_slot","") or "")
+        ok_slot = str(r.get("ok_slot","") or "")
+
+        slot = ik_slot if side.upper()=="IK" else ok_slot
+        a,b = _slot_range(slot)
+        width_hint = 0 if a==999 else (b-a+1)
+
+        c = cols[i % 2]; i += 1
+        label = f"{k}{tag_suffix}"
+        key = f"U:{pair_id}:{side}:{k}"
+
+        # 프리필 값(문자열) 준비
+        pre_val = "" if prefill.get(k) is None else str(prefill.get(k)).strip()
+
+        if dtype == "lookup" and lookup:
+            opts = lookup_options(lookups, lookup, pt_for_lookup)  # {code: label}
+            if opts:
+                codes = list(opts.keys())
+                # ★ 변경: selectbox 기본값 주입
+                if pre_val and pre_val in codes:
+                    _prime_default(key, pre_val)
+                    sel = c.selectbox(label, codes, format_func=lambda code: f"{code} - {opts.get(code,'')}",
+                                      key=key)
+                else:
+                    sel = c.selectbox(label, codes, format_func=lambda code: f"{code} - {opts.get(code,'')}",
+                                      key=key)
+                attrs[k] = sel
+            else:
+                # 룩업 테이블이 비어있으면 코드 직접 입력
+                _prime_default(key, pre_val)
+                attrs[k] = c.text_input(f"{label} [코드]", key=key)
+        else:
+            # 자유 입력 — 자리 힌트 제공
+            _prime_default(key, pre_val)  # ★ 변경: text_input 기본값
+            ph = f"{width_hint}자리 숫자" if width_hint>0 else ""
+            attrs[k] = c.text_input(label, key=key, placeholder=ph)
+
+    return attrs
+
+def get_required_sets(udf, pair_id: str, base_side: str):
+    need_base  = required_keys(udf, pair_id, base_side)
+    need_extra = extra_keys_from_other_side(udf, pair_id, base_side)
+    if not need_base and not need_extra:
+        all_keys = udf[udf["pair_id"] == pair_id]["key"].dropna().unique().tolist()
+        need_base = all_keys
+    return need_base, need_extra
 
 # ---------------------------------------------------------------------
-# 6) 좌/우 패널 (입력쪽만 속성 표시, 반대쪽은 '자동 조회 대상' 표시)
+# 6) 좌/우 패널 렌더
 # ---------------------------------------------------------------------
 ik_selected, ok_selected = {}, {}
 col_left, col_right = st.columns(2)
 
+need_base, need_extra = ([], [])
+if pair_id:
+    need_base, need_extra = get_required_sets(udf, pair_id, base_side)
+
 with col_left:
     st.subheader("익산")
-    if basis_ik and ik_pt:
-        ik_selected = render_attributes("IK", ik_pt)
-        st.caption(f"part_type: {ik_pt}")
+    if ik_pt and ok_pt and pair_id:
+        if basis_ik:
+            ik_selected = _render_inputs_for_side(udf, pair_id, "IK", ik_pt, need_base)
+            st.caption(f"part_type: {ik_pt}  (기준 측)")
+        else:
+            ik_selected = _render_inputs_for_side(udf, pair_id, "IK", ik_pt, need_extra, tag_suffix=" (추가)")
+            st.caption(f"part_type: {ik_pt}  (상대측 추가)")
     else:
         st.caption(f"part_type: {ik_pt or '-'} (자동 조회 대상)")
 
 with col_right:
     st.subheader("옥천")
-    if (not basis_ik) and ok_pt:
-        ok_selected = render_attributes("OK", ok_pt)
-        st.caption(f"part_type: {ok_pt}")
+    if ik_pt and ok_pt and pair_id:
+        if basis_ik:
+            ok_selected = _render_inputs_for_side(udf, pair_id, "OK", ok_pt, need_extra, tag_suffix=" (추가)")
+            st.caption(f"part_type: {ok_pt}  (상대측 추가)")
+        else:
+            ok_selected = _render_inputs_for_side(udf, pair_id, "OK", ok_pt, need_base)
+            st.caption(f"part_type: {ok_pt}  (기준 측)")
     else:
         st.caption(f"part_type: {ok_pt or '-'} (자동 조회 대상)")
 
 # ---------------------------------------------------------------------
-# 7) 조회: 스키마 기반 동적 조립 → matched_parts 조회(있으면) → 항상 좌/우 결과 표시
+# 7) 조회/생성
 # ---------------------------------------------------------------------
 st.divider()
 if st.button("조회"):
-    # matched_parts 로드 및 코드 컬럼 정규화 준비
+    if not pair_id:
+        st.error("IK/OK pair가 확정되지 않았습니다.")
+        st.stop()
+
+    # 좌/우 입력 병합
+    attrs = {}
+    attrs.update(ik_selected or {})
+    attrs.update(ok_selected or {})
+
+    # 필수 누락 점검
+    miss_base  = missing_required_keys(udf, pair_id, base_side,  attrs)
+    miss_other = missing_required_keys(udf, pair_id, other_side, attrs)
+    if miss_base:
+        st.error(f"기준({base_side}) 필수 누락: {miss_base}")
+        st.stop()
+    if miss_other:
+        st.warning(f"상대({other_side}) 필수 누락: {miss_other} — 이 키들까지 입력하면 완전한 11자리 생성")
+
+    # 11자리 동시 생성
+    ik_code, ok_code = encode_both(udf, pair_id, attrs)
+    if ik_code: st.success(f"IK 코드: `{ik_code}`")
+    if ok_code: st.success(f"OK 코드: `{ok_code}`")
+
+    # matched_parts 확인/보강
     mdf = load_matched_full().copy()
-    ik_col = next((c for c in mdf.columns if "ik" in c.lower() and "code" in c.lower()),
-                  mdf.columns[0])
-    ok_col = next((c for c in mdf.columns if ("ok" in c.lower() and "code" in c.lower())
-                   or "km" in c.lower()),
-                  mdf.columns[1] if mdf.shape[1] > 1 else mdf.columns[0])
-    mdf["__ik_norm"] = mdf[ik_col].map(_norm)
-    mdf["__ok_norm"] = mdf[ok_col].map(_norm)
+    if not mdf.empty:
+        ik_col = next((c for c in mdf.columns if "ik" in c.lower() and "code" in c.lower()),
+                      mdf.columns[0])
+        ok_col = next((c for c in mdf.columns if ("ok" in c.lower() and "code" in c.lower())
+                       or "km" in c.lower()),
+                      mdf.columns[1] if mdf.shape[1] > 1 else mdf.columns[0])
+        mdf["__ik_norm"] = mdf[ik_col].map(_norm)
+        mdf["__ok_norm"] = mdf[ok_col].map(_norm)
 
-    ik_code, ok_code = None, None
-
-    # ─────────────────────────────────────────────────
-    # (A) 익산 기준 입력 → IK 11자리 조립 → matched_parts로 OK 조회
-    # ─────────────────────────────────────────────────
-    if basis_ik:
-        if not ik_pt:
-            st.error("익산 part_type 없음")
-            st.stop()
-
-        # 미입력 항목 경고(조립은 가능한 만큼 진행)
-        missing = [k for k, v in (ik_selected or {}).items() if not str(v).strip()]
-        if missing:
-            st.warning("익산 입력값 누락: " + ", ".join(missing))
-
-        # 1) 자리수 자동 패딩
-        ik_selected_norm = normalize_selected_by_schema("IK", ik_pt, ik_selected)
-        # 2) 스키마 순서대로 조립
-        ik_code = assemble_by_schema("IK", ik_pt, ik_selected_norm)
-
-        # 3) matched_parts에서 상대(OK) 코드 조회 (없으면 part_type 매핑 fallback)
         if ik_code:
-            st.success(f"IK 코드: `{ik_code}`")
             hit = mdf[mdf["__ik_norm"] == _norm(ik_code)]
-        else:
-            # 11자리 조립 불가 시: part_type 수준으로 매칭 시도
-            hit = mdf[(mdf["__ik_norm"] == _norm(ik_pt)) | (mdf[ik_col] == ik_pt)]
-
-        if hit.empty:
-            # matched_parts에 정합쌍이 없을 때는 Cross_Map 페어 part_type로라도 안내
-            ok_pair = load_crossmap()[0].get(ik_pt, ok_pt or "")
-            if ok_pair:
-                st.success(f"OK 결과(페어 part_type): `{ok_pair}`")
-                ok_code = ok_pair
-            else:
-                st.info("OK 결과를 찾지 못했습니다.")
-        else:
-            ok_code = hit.iloc[0][ok_col]
-            st.success(f"OK 결과: `{ok_code}`")
-
-    # ─────────────────────────────────────────────────
-    # (B) 옥천 기준 입력 → OK 11자리 조립 → matched_parts로 IK 조회
-    # ─────────────────────────────────────────────────
-    else:
-        if not ok_pt:
-            st.error("옥천 part_type 없음")
-            st.stop()
-
-        missing = [k for k, v in (ok_selected or {}).items() if not str(v).strip()]
-        if missing:
-            st.warning("옥천 입력값 누락: " + ", ".join(missing))
-
-        ok_selected_norm = normalize_selected_by_schema("OK", ok_pt, ok_selected)
-        ok_code = assemble_by_schema("OK", ok_pt, ok_selected_norm)
-
-        if ok_code:
-            st.success(f"OK 코드: `{ok_code}`")
+            if not hit.empty:
+                ok_code = hit.iloc[0][ok_col]
+                st.info(f"matched_parts 기준 OK: `{ok_code}`")
+        elif ok_code:
             hit = mdf[mdf["__ok_norm"] == _norm(ok_code)]
-        else:
-            hit = mdf[(mdf["__ok_norm"] == _norm(ok_pt)) | (mdf[ok_col] == ok_pt)]
-
-        if hit.empty:
-            ik_pair = load_crossmap()[1].get(ok_pt, ik_pt or "")
-            if ik_pair:
-                st.success(f"IK 결과(페어 part_type): `{ik_pair}`")
-                ik_code = ik_pair
-            else:
-                st.info("IK 결과를 찾지 못했습니다.")
-        else:
-            ik_code = hit.iloc[0][ik_col]
-            st.success(f"IK 결과: `{ik_code}`")
+            if not hit.empty:
+                ik_code = hit.iloc[0][ik_col]
+                st.info(f"matched_parts 기준 IK: `{ik_code}`")
 
 # ---------------------------------------------------------------------
-# 8) 이미지 출력 (좌=IK / 우=OK, 가로 배치, use_container_width 사용)
+# 8) 이미지 출력 (좌=IK / 우=OK)
 # ---------------------------------------------------------------------
 st.divider()
 col_l, col_r = st.columns(2)
@@ -363,7 +424,6 @@ with col_l:
     if ik_pt:
         imgs = load_images(ik_pt)
         if imgs:
-            # deprecated 경고 없는 파라미터 (열 너비 맞춤)
             st.image(imgs[:2], use_container_width=True)
         else:
             st.info("이미지 없음")
