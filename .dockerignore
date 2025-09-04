@@ -1,0 +1,25 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Envs & tooling
+.venv/
+.env
+*.env
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Notebooks & outputs
+*.ipynb
+.ipynb_checkpoints/
+
+# Local data and images (we'll mount these)
+data/
+images/
+
+# Misc
+.DS_Store
