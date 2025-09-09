@@ -1,12 +1,10 @@
 services:
   codebridge:
-    build: .
     image: code-bridge:latest
-    container_name: codebridge
     environment:
       - PORT=8501
     ports:
-      - "8501:8501"
+      - "80:8501"     # ← 80으로 변경 (기존 "8501:8501" 제거)
     volumes:
       - ./data:/app/data:rw
       - ./images:/app/images:rw
