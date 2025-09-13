@@ -28,7 +28,8 @@
 - **part_master.csv** : 사이트별 part_type 카탈로그
 - **parsed_parts.csv** : 부품군 + 가능 코드 목록
 - **matched_parts.csv** : 최종 매칭 결과 (match_flag = OK / NO_MATCH)
-
+- **Images/IK&OK** : 익산/옥천 메뉴얼 이미지
+  
 ---
 
 ## 🔄 데이터 처리 흐름
