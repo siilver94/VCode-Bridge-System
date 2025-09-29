@@ -1,0 +1,32 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Jupyter / Streamlit
+.ipynb_checkpoints/
+.streamlit/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+*.tmp
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+
+# Docker
+*.pid
+*.seed
+*.tar
