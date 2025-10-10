@@ -26,7 +26,8 @@ def _base_dir():
     return Path(fname).resolve().parents[1]         # 노트북 파일 기준 상위의 상위 폴더 반환
 
 BASE_DIR = _base_dir()               # 프로젝트 루트(어디서 실행하든 일관된 기준)
-DATA_DIR  = BASE_DIR / "data"        # 데이터 폴더(입·출력 CSV 등)
+DATA_DIR  = BASE_DIR / "data"   
+LOOKUP_DIR = BASE_DIR / "data" / "lookup"   # 데이터 폴더(입·출력 CSV 등)
 IMG_DIR   = BASE_DIR / "images"      # 이미지 폴더
 
 # 안전 CSV 로더: UTF-8 → UTF-8-SIG → CP949 → EUC-KR 순서로 시도
@@ -154,7 +155,7 @@ def load_lookups() -> dict:
     ]
     result = {}
     for f in files:
-        p = DATA_DIR / f
+        p = LOOKUP_DIR / f
         if not p.exists():
             continue                         # 파일이 없으면 건너뛰기(유연성)
         df = pd.read_csv(p, dtype=str).fillna('')  # 문자열/결측치 정규화
