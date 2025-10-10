@@ -250,3 +250,4 @@ def load_crossmap():
 def load_matched_full():
     """matched_parts.csv 전체를 안전 로더로 읽어 반환(캐시)"""
     return read_csv_safe("matched_parts.csv")
+
