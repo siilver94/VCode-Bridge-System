@@ -24,11 +24,16 @@ from utils.loaders import (
     load_union_schema,      # union_schema.csv 로더
 )
 
+# 이미지
+# from utils.images import find_images
+from utils.images import find_images_with_prefix_fallback
+
 # vcode_codec (11자리 조립/해석기)
 from notebooks.vcode_codec import (
     encode_both, required_keys, extra_keys_from_other_side, missing_required_keys, _slot_to_range,
     decode_attrs_from_code,
 )
+
 
 # ---------------------------------------------------------------------
 # 기본 페이지 설정 (wide + 제목/아이콘)
@@ -416,27 +421,52 @@ if st.button("조회"):
 # ---------------------------------------------------------------------
 # 8) 이미지 출력 (좌=IK / 우=OK)
 # ---------------------------------------------------------------------
+def render_images(part_code: str, site: str):
+    imgs, used_key = find_images_with_prefix_fallback(
+        part_code=part_code,
+        site=site,
+        base_dir="images",
+        max_n=5,
+        min_prefix_len=3,  # V11처럼 3글자까지만 접두어 허용 (필요시 2로 낮출 수 있음)
+    )
+
+    st.subheader("이미지")
+    if not imgs:
+        st.info("등록된 이미지가 없습니다.")
+        return
+
+    # 공유 이미지 안내
+    if used_key and used_key != part_code:
+        st.caption(f"공유 이미지 사용: '{used_key}_*'")
+
+    # 그리드 표시
+    n = len(imgs)
+    cols = st.columns(min(5, n))
+    for i, img_path in enumerate(imgs):
+        with cols[i % len(cols)]:
+            st.image(str(img_path), use_container_width=True, caption=img_path.name)
+
+    # 확대 보기
+    if n > 1:
+        picked = st.selectbox("크게 보기", [p.name for p in imgs], index=0)
+        big = next(p for p in imgs if p.name == picked)
+        st.image(str(big))
+
+
 st.divider()
 col_l, col_r = st.columns(2)
 
 with col_l:
     st.subheader("익산 이미지")
     if ik_pt:
-        imgs = load_images(ik_pt)
-        if imgs:
-            st.image(imgs[:2], use_container_width=True)
-        else:
-            st.info("이미지 없음")
+        # ik_pt가 'V111' 형태여야 파일형(V111_1.jpg)과 매칭됩니다.
+        render_images(part_code=ik_pt, site="IK")
     else:
         st.info("IK part_type 미선택")
 
 with col_r:
     st.subheader("옥천 이미지")
     if ok_pt:
-        imgs2 = load_images(ok_pt)
-        if imgs2:
-            st.image(imgs2[:2], use_container_width=True)
-        else:
-            st.info("이미지 없음")
+        render_images(part_code=ok_pt, site="OK")
     else:
         st.info("OK part_type 미선택")
