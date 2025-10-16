@@ -33,6 +33,109 @@ from notebooks.vcode_codec import (
     encode_both, required_keys, extra_keys_from_other_side, missing_required_keys, _slot_to_range,
     decode_attrs_from_code,
 )
+import re
+
+V3_RE = re.compile(r"^(V)(\d{2})(\d)$", re.IGNORECASE)  # V111, V802...
+V2_RE = re.compile(r"^(V)(\d{2})$",     re.IGNORECASE)  # V11, V80...
+
+def _ik_group_key(ptype: str) -> str:
+    s = (ptype or "").strip().upper()
+    m3 = V3_RE.match(s)
+    if m3:
+        return f"{m3.group(1)}{m3.group(2)}"
+    return s
+
+def _candidate_keys(system: str, ptype_raw: str) -> list[str]:
+    """IK: [정확, 그룹] / OK: [정확]"""
+    s = (ptype_raw or "").strip().upper()
+    if system == "IK":
+        g = _ik_group_key(s)
+        return [s] if s == g else [s, g]
+    return [s]
+
+def _extract_spec_common(bundle):
+    """
+    load_lookups()[table] 이 반환하는 여러 포맷을 spec/common 두 dict로 표준화.
+    지원 포맷:
+      - (spec, common)
+      - (spec, common, meta...)
+      - {"spec": dict, "common": dict}
+      - {"by_part_type": {(pt,code):label}, "*": {code:label}}
+      - {"V11": {code:label}, "V801": {...}, "*": {...}}  # 중첩 dict → (pt,code)로 평탄화
+    """
+    spec, common = {}, {}
+
+    # 튜플/리스트 포맷
+    if isinstance(bundle, (list, tuple)):
+        if len(bundle) >= 2:
+            spec, common = bundle[0], bundle[1]
+            if not isinstance(spec, dict):  spec = {}
+            if not isinstance(common, dict): common = {}
+            return spec, common
+
+    # 딕셔너리 포맷
+    if isinstance(bundle, dict):
+        # 흔한 키 우선 탐색
+        cand_spec_keys   = ("spec", "by_part_type", "pt", "map", "part_type")
+        cand_common_keys = ("common", "*", "global")
+        for k in cand_spec_keys:
+            if k in bundle and isinstance(bundle[k], dict):
+                spec = bundle[k]
+                break
+        for k in cand_common_keys:
+            if k in bundle and isinstance(bundle[k], dict):
+                common = bundle[k]
+                break
+
+        # 아직도 spec 비었으면: { "V11": {...}, "V801": {...}, "*": {...} } 스타일 평탄화
+        if not spec:
+            flat = {}
+            for k, v in bundle.items():
+                if k == "*" or not isinstance(v, dict):
+                    continue
+                # k = part_type, v = {code: label}
+                for code, label in v.items():
+                    flat[(str(k).upper().strip(), str(code))] = label
+            if flat:
+                spec = flat
+
+        # common이 없고 '*'가 있으면 사용
+        if not common and "*" in bundle and isinstance(bundle["*"], dict):
+            common = bundle["*"]
+
+        return spec or {}, common or {}
+
+    # 알 수 없는 포맷
+    return {}, {}
+
+def _merged_lookup_options(lookups: dict, table: str, system: str, ptype_raw: str) -> dict:
+    """
+    반환: {code: label}, 우선순위 = 정확 > 그룹 > 공통(*)
+    """
+    bundle = lookups.get(table)
+    if bundle is None:
+        return {}
+
+    spec, common = _extract_spec_common(bundle)
+
+    out: dict[str, str] = {}
+    # 1) 정확/그룹 순회 (먼저 들어온 게 우선)
+    for key in _candidate_keys(system, ptype_raw):
+        for (pt, code), label in spec.items() if spec and next(iter(spec.keys()), (None, None)) and isinstance(next(iter(spec.keys())), tuple) else []:
+            if pt == key and str(code) not in out:
+                out[str(code)] = str(label)
+        # spec이 (pt,code)->label 평탄화가 아닌, {pt:{code:label}} 구조일 수도 있어 보강
+        if spec and isinstance(next(iter(spec.values())), dict):
+            inner = spec.get(key, {})
+            for code, label in inner.items():
+                out.setdefault(str(code), str(label))
+
+    # 2) 공통(*) 추가
+    for code, label in common.items():
+        out.setdefault(str(code), str(label))
+
+    return out
+
 
 
 # ---------------------------------------------------------------------
@@ -184,7 +287,10 @@ for _, r in df_show.iterrows():
     else:
         paired   = ok2ik.get(pt, "")
         pair_txt = f"{paired} ↔ {pt}" if paired else pt
-    label_map[f"{r.remark} ({pair_txt})"] = (pt, paired)
+   # label_map[f"{r.remark} ({pair_txt})"] = (pt, paired)
+    remark = (r['remark'] if 'remark' in r else r.get('remark', '')).strip()
+    key = f"{remark} ({pair_txt})" if remark else pair_txt
+    label_map[key] = (pt, paired)
 
 labels = list(label_map.keys())
 if not labels:
@@ -302,7 +408,8 @@ def _render_inputs_for_side(
         pre_val = "" if prefill.get(k) is None else str(prefill.get(k)).strip()
 
         if dtype == "lookup" and lookup:
-            opts = lookup_options(lookups, lookup, pt_for_lookup)  # {code: label}
+            system_local = "IK" if str(pt_for_lookup).upper().startswith("V") else "OK"
+            opts = _merged_lookup_options(lookups, lookup, system_local, pt_for_lookup)  # {code: label}
             if opts:
                 codes = list(opts.keys())
                 # ★ 변경: selectbox 기본값 주입
