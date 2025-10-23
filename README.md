@@ -1,4 +1,4 @@
-# VCode-Bridge-System
+# SPF(Standard Parts Finder)
 
 ## 📌 프로젝트 개요
 익산(V-Code)과 옥천(KM-Code) 두 체계로 운용되어 온 부품 코드 관리 방식을 **하나의 통합 조회 시스템**으로 구현한 프로젝트입니다.  
